@@ -1,0 +1,8 @@
+.vscode/**
+src/**
+eslint.config.js
+tsconfig.json
+.gitignore
+*.vsix
+package-lock.json
+images/publisher-logo.png

@@ -1,0 +1,187 @@
+{
+  "name": "bba-localllm-bridge",
+  "displayName": "BBA LocalLLM Bridge",
+  "description": "Expose Ollama and LM Studio models in the VS Code chat model picker.",
+  "version": "0.0.3",
+  "publisher": "amitworx",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": {
+    "name": "Amit Sharma",
+    "url": "https://builtbyamit.com/"
+  },
+  "homepage": "https://github.com/amitworx/bba-localllm-bridge#readme",
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#0f172a",
+    "theme": "dark"
+  },
+  "pricing": "Free",
+  "extensionKind": [
+    "ui"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "llm",
+    "ollama",
+    "lm studio",
+    "chat",
+    "models"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext .ts",
+    "check": "npm run compile && npm run lint",
+    "package": "vsce package"
+  },
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:bbaLocalLlmBridge.manageProvider",
+    "onCommand:bbaLocalLlmBridge.refreshModels",
+    "onCommand:bbaLocalLlmBridge.inspectToolSupport",
+    "onCommand:bbaLocalLlmBridge.configureChatVisibility"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "bbaLocalLlmBridge.manageProvider",
+        "title": "BBA LocalLLM Bridge: Manage Provider"
+      },
+      {
+        "command": "bbaLocalLlmBridge.refreshModels",
+        "title": "BBA LocalLLM Bridge: Refresh Models"
+      },
+      {
+        "command": "bbaLocalLlmBridge.inspectToolSupport",
+        "title": "BBA LocalLLM Bridge: Inspect Tool Support"
+      },
+      {
+        "command": "bbaLocalLlmBridge.configureChatVisibility",
+        "title": "BBA LocalLLM Bridge: Configure Chat Visibility"
+      }
+    ],
+    "configuration": {
+      "title": "BBA LocalLLM Bridge",
+      "properties": {
+        "bbaLocalLlmBridge.defaultProvider": {
+          "type": "string",
+          "enum": [
+            "ollama",
+            "lmstudio"
+          ],
+          "default": "ollama",
+          "description": "Provider offered first in the management flow."
+        },
+        "bbaLocalLlmBridge.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 1000,
+          "description": "Timeout for provider discovery and chat requests."
+        },
+        "bbaLocalLlmBridge.chatModelVisibility": {
+          "type": "string",
+          "enum": [
+            "balanced",
+            "strict",
+            "all-chat-models"
+          ],
+          "default": "balanced",
+          "markdownDescription": "Controls how aggressively models are advertised as chat-capable in the VS Code Chat picker. `balanced` prefers showing likely chat models while retrying without tools if needed, `strict` only advertises tool calling when provider metadata or explicit allowlists say so, and `all-chat-models` advertises every non-embedding model for chat."
+        },
+        "bbaLocalLlmBridge.ollama.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Ollama as a model source."
+        },
+        "bbaLocalLlmBridge.ollama.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "Base URL for the Ollama server."
+        },
+        "bbaLocalLlmBridge.ollama.models": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional allowlist of Ollama model names. Leave empty to discover all models."
+        },
+        "bbaLocalLlmBridge.ollama.toolCallingModels": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional allowlist of Ollama models that should advertise tool-calling support. Leave empty to use name-based heuristics."
+        },
+        "bbaLocalLlmBridge.lmStudio.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable LM Studio as a model source."
+        },
+        "bbaLocalLlmBridge.lmStudio.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:1234",
+          "description": "Base URL for the LM Studio local server."
+        },
+        "bbaLocalLlmBridge.lmStudio.apiKey": {
+          "type": "string",
+          "default": "lm-studio",
+          "markdownDescription": "Optional API key for LM Studio's OpenAI-compatible server. Many local setups accept any non-empty value."
+        },
+        "bbaLocalLlmBridge.lmStudio.models": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional allowlist of LM Studio model IDs. Leave empty to discover all models."
+        },
+        "bbaLocalLlmBridge.lmStudio.toolCallingModels": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional allowlist of LM Studio models that should advertise tool-calling support. Leave empty to use model metadata when available, otherwise fall back to name-based heuristics."
+        }
+      }
+    },
+    "languageModelChatProviders": [
+      {
+        "vendor": "bba-local-llm-bridge",
+        "displayName": "BBA LocalLLM Bridge",
+        "managementCommand": "bbaLocalLlmBridge.manageProvider"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amitworx/bba-localllm-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/amitworx/bba-localllm-bridge/issues"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "@types/vscode": "^1.105.0",
+    "@typescript-eslint/eslint-plugin": "^8.38.0",
+    "@typescript-eslint/parser": "^8.38.0",
+    "@vscode/vsce": "^3.6.1",
+    "eslint": "^9.31.0",
+    "typescript": "^5.8.3"
+  }
+}
