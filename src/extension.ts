@@ -506,6 +506,9 @@ async function streamOllamaChat(
 ): Promise<void> {
   const backendMessages = convertMessages(messages, backend.provider);
   const requestUsesTools = tools.length > 0;
+  const outboundMessages = maybeForceToolModeForOllama(backendMessages, options.toolMode, requestUsesTools);
+  const outboundTools = requestUsesTools ? convertTools(tools) : undefined;
+  log('request-size', requestSizeDiagnostic(outboundMessages, outboundTools, getConfig().ollama.contextTokens));
   let response: Response;
   try {
     response = await fetchWithTimeout(`${backend.baseUrl}/api/chat`, {
@@ -515,8 +518,8 @@ async function streamOllamaChat(
       },
       body: JSON.stringify({
         model: backend.modelId,
-        messages: maybeForceToolModeForOllama(backendMessages, options.toolMode, requestUsesTools),
-        tools: requestUsesTools ? convertTools(tools) : undefined,
+        messages: outboundMessages,
+        tools: outboundTools,
         stream: true,
         options: { num_ctx: getConfig().ollama.contextTokens, ...(requestUsesTools ? { num_predict: getConfig().ollama.toolMaxTokens } : {}) }
       }),
@@ -564,6 +567,8 @@ interface OllamaToolChunk {
   error?: string;
   done?: boolean;
   done_reason?: string;
+  prompt_eval_count?: number;
+  eval_count?: number;
   message?: { content?: string; thinking?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: object } }> };
 }
 
@@ -590,7 +595,9 @@ async function readOllamaToolStream(
     calls.push(...(chunk.message?.tool_calls || []));
     if (chunk.done) {
       completed = true;
-      log('stream-finished', { chunks, thinkingCharacters, bufferedToolCalls: calls.length, generationLimitReached: chunk.done_reason === 'length' });
+      log('stream-finished', { chunks, thinkingCharacters, bufferedToolCalls: calls.length, generationLimitReached: chunk.done_reason === 'length',
+        ...(Number.isSafeInteger(chunk.prompt_eval_count) ? { promptEvalTokens: chunk.prompt_eval_count } : {}),
+        ...(Number.isSafeInteger(chunk.eval_count) ? { generatedTokens: chunk.eval_count } : {}) });
       if (chunk.done_reason === 'length') {
         throw new Error('Ollama tool generation reached its token limit. No buffered tool calls were emitted.');
       }
@@ -599,6 +606,19 @@ async function readOllamaToolStream(
   if (!completed) { throw new Error('Ollama tool stream ended before its completion marker.'); }
   // Only complete streams can emit executable calls. Schema checks still run at the provider boundary.
   reportOllamaResponse({ tool_calls: calls }, progress);
+}
+
+function requestSizeDiagnostic(messages: ProviderChatMessage[], tools: object[] | undefined, contextTokens: number): object {
+  const messageJson = JSON.stringify(messages);
+  const toolJson = JSON.stringify(tools || []);
+  const estimatedInputTokens = Math.ceil((messageJson.length + toolJson.length) / 4);
+  return {
+    messageBytes: new TextEncoder().encode(messageJson).length,
+    toolSchemaBytes: new TextEncoder().encode(toolJson).length,
+    estimatedInputTokens, configuredContextTokens: contextTokens,
+    estimateExceedsContext: estimatedInputTokens > contextTokens,
+    estimateMethod: 'serialized-characters-divided-by-four; excludes chat-template overhead; not a tokenizer'
+  };
 }
 
 function safeFailureDetails(error: unknown): { errorType: string; causeCode?: string; httpStatus?: number } {
@@ -1360,4 +1380,4 @@ function findEventBoundary(buffer: string): number {
   return Math.min(unixBoundary, windowsBoundary);
 }
 
-export const testing = { readOllamaToolStream, safeFailureDetails, getUsableTools, convertMessages, convertTools, normalizeToolArguments, validateToolCall, evaluateToolCalling, shouldRetryWithoutTools, readNdjsonStream, readSseStream, LocalLlmChatProvider };
+export const testing = { requestSizeDiagnostic, readOllamaToolStream, safeFailureDetails, getUsableTools, convertMessages, convertTools, normalizeToolArguments, validateToolCall, evaluateToolCalling, shouldRetryWithoutTools, readNdjsonStream, readSseStream, LocalLlmChatProvider };

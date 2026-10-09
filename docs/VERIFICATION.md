@@ -45,3 +45,9 @@ Further user evidence: 58-tool Agent request hit request timeout; longer timeout
 User server logs showed generation beyond 4000 tokens, a 4096-token context shift and client disconnect after 5m2s while Ollama stayed healthy. The underlying client cause was not captured; a separate header timeout is a hypothesis. Ollama tool requests now stream NDJSON, log chunk/thinking character counts only, and limit generation to 1024 tokens by default. No calls are emitted from truncated or token-limited streams. The limit can be raised with ollama.toolMaxTokens; normal Ask has no new output cap. Context is explicitly requested via num_ctx and advertised consistently through ollama.contextTokens. Known fetch cause codes and HTTP status are logged without raw messages.
 
 Official protocol references: https://docs.ollama.com/api/chat and https://docs.ollama.com/capabilities/tool-calling . Live acceptance of these changes remains pending.
+
+## Live controlled acceptance (user-reported, 2026-10-10)
+
+Ollama 0.40.2, qwen3:8b digest prefix 500a1f067a9f, context 4096, 30% CPU / 70% GPU allocation. With streaming and read_file filter: native read_file emitted after schema validation, subsequent reply returned BRIDGE-7429; follow-up after compaction returned M1 (UI showed Read activity). With filter cleared, 34 tools including read_file were sent; stream completed normally with no calls and model incorrectly claimed read_file unavailable. General Agent acceptance remains failed; single-tool path passed. Larger request truncation is a hypothesis, not a confirmed diagnosis.
+
+New request-size events report serialized message/schema bytes and a rough characters/4 token estimate, explicitly excluding template overhead. Completion reports provider prompt_eval_count/eval_count when supplied. Provider prompt counts can describe already-truncated input and cannot alone prove absence of truncation. No automatic tool removal or context increase is performed.

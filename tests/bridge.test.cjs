@@ -105,7 +105,7 @@ test('diagnostics identify rejected native call without leaking argument values'
  await assert.rejects(new t.LocalLlmChatProvider(line => logs.push(JSON.parse(line))).provideLanguageModelChatResponse(
  { id: 'ollama::qwen', capabilities: { toolCalling: true } }, [], { tools: [tool], toolMode: 2 }, { report() {} },
  { onCancellationRequested: () => ({ dispose() {} }) }));
- assert.deepEqual(logs.map(x => x.event), ['request', 'stream-progress', 'stream-finished', 'native-tool-call', 'validation-rejected', 'failed']);
+ assert.deepEqual(logs.map(x => x.event), ['request', 'request-size', 'stream-progress', 'stream-finished', 'native-tool-call', 'validation-rejected', 'failed']);
  assert.ok(!JSON.stringify(logs).includes('PRIVATE_VALUE'));
  } finally { global.fetch = oldFetch; }
 });
@@ -165,4 +165,12 @@ test('safe fetch diagnostics expose known cause codes without messages or secret
  const error = new TypeError('PRIVATE_ENDPOINT'); error.cause = { code: 'UND_ERR_HEADERS_TIMEOUT', message: 'PRIVATE_SECRET' };
  assert.deepEqual(t.safeFailureDetails(error), { errorType: 'type-error', causeCode: 'UND_ERR_HEADERS_TIMEOUT' });
  error.cause.code = 'PRIVATE_SECRET'; assert.equal(t.safeFailureDetails(error).causeCode, undefined);
+});
+test('request size diagnostics expose counts, label estimates, and omit content', () => {
+ const messages = [{ role: 'user', content: 'PRIVATE_内容' }];
+ const data = t.requestSizeDiagnostic(messages, [{ description: 'PRIVATE_SCHEMA' }], 1);
+ assert.ok(data.messageBytes > JSON.stringify(messages).length);
+ assert.equal(data.estimateExceedsContext, true);
+ assert.match(data.estimateMethod, /not a tokenizer/);
+ assert.ok(!JSON.stringify(data).includes('PRIVATE_'));
 });
