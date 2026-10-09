@@ -44,15 +44,17 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext .ts",
-    "check": "npm run compile && npm run lint",
-    "package": "vsce package"
+    "check": "npm run compile && npm run lint && node --test tests/*.test.cjs",
+    "package": "vsce package",
+    "test": "npm run compile && node --test tests/*.test.cjs"
   },
   "activationEvents": [
     "onStartupFinished",
     "onCommand:bbaLocalLlmBridge.manageProvider",
     "onCommand:bbaLocalLlmBridge.refreshModels",
     "onCommand:bbaLocalLlmBridge.inspectToolSupport",
-    "onCommand:bbaLocalLlmBridge.configureChatVisibility"
+    "onCommand:bbaLocalLlmBridge.configureChatVisibility",
+    "onCommand:bbaLocalLlmBridge.showDiagnostics"
   ],
   "contributes": {
     "commands": [
@@ -71,6 +73,10 @@
       {
         "command": "bbaLocalLlmBridge.configureChatVisibility",
         "title": "BBA LocalLLM Bridge: Configure Chat Visibility"
+      },
+      {
+        "command": "bbaLocalLlmBridge.showDiagnostics",
+        "title": "BBA LocalLLM Bridge: Show Diagnostics"
       }
     ],
     "configuration": {
@@ -99,7 +105,7 @@
             "all-chat-models"
           ],
           "default": "balanced",
-          "markdownDescription": "Controls how aggressively models are advertised as chat-capable in the VS Code Chat picker. `balanced` prefers showing likely chat models while retrying without tools if needed, `strict` only advertises tool calling when provider metadata or explicit allowlists say so, and `all-chat-models` advertises every non-embedding model for chat."
+          "markdownDescription": "Legacy visibility preference. Does not establish or enable tool capability. Chat discovery remains available independently of tool support."
         },
         "bbaLocalLlmBridge.ollama.enabled": {
           "type": "boolean",
@@ -125,7 +131,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Optional allowlist of Ollama models that should advertise tool-calling support. Leave empty to use name-based heuristics."
+          "description": "Legacy preference only. This allowlist is not proof of tool capability and does not enable tools without provider metadata."
         },
         "bbaLocalLlmBridge.lmStudio.enabled": {
           "type": "boolean",
@@ -156,7 +162,34 @@
           "items": {
             "type": "string"
           },
-          "description": "Optional allowlist of LM Studio models that should advertise tool-calling support. Leave empty to use model metadata when available, otherwise fall back to name-based heuristics."
+          "description": "Legacy preference only. This allowlist is not proof of tool capability and does not enable tools without provider metadata."
+        },
+        "bbaLocalLlmBridge.diagnosticToolFilter": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "scope": "window",
+          "description": "Temporary diagnostic filter: send only these exact tool names from tools supplied by VS Code (for example read_file). Empty disables filtering. Does not enable tool capability or add tools. Clear after testing."
+        },
+        "bbaLocalLlmBridge.ollama.contextTokens": {
+          "type": "integer",
+          "default": 4096,
+          "minimum": 1024,
+          "description": "Context tokens explicitly requested from Ollama and advertised to VS Code. Larger contexts consume more memory. Refresh Models after changing."
+        },
+        "bbaLocalLlmBridge.ollama.toolMaxTokens": {
+          "type": "integer",
+          "default": 1024,
+          "minimum": 64,
+          "maximum": 8192,
+          "description": "Generation token limit for Ollama requests containing tools, including thinking tokens. Reaching the limit fails without emitting buffered calls. Does not limit ordinary Ask responses."
+        },
+        "bbaLocalLlmBridge.ollama.guardToolContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reject tool-bearing Ollama requests before HTTP when the rough serialized-character input estimate exceeds contextTokens. This is not an exact tokenizer count and may reject requests that would fit or miss ones that do not. Disable only for controlled testing. Ordinary Ask requests are unaffected."
         }
       }
     },
@@ -183,5 +216,8 @@
     "@vscode/vsce": "^3.6.1",
     "eslint": "^9.31.0",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0"
   }
 }

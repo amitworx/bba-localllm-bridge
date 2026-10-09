@@ -1,3 +1,12 @@
+# Unreleased
+
+- Validate native tool arguments against offered schemas; reject missing startLine without invented defaults.
+- Preserve provider-specific tool histories and LM Studio result IDs.
+- Use Ollama /api/show capability reports; remove visibility/allowlist capability inference.
+- Restrict optional unsupported-tool fallback and keep required requests explicit.
+- Keep cancellation/timeout active through response bodies.
+- Add project guidance, regression tests and CI; live acceptance pending.
+
 # Changelog
 
 ## 0.0.3
