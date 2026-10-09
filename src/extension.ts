@@ -4,6 +4,11 @@ import Ajv from 'ajv';
 const PROVIDER_ID = 'bba-local-llm-bridge';
 const CONFIG_SECTION = 'bbaLocalLlmBridge';
 const CACHE_TTL_MS = 30_000;
+let diagnosticOutput: vscode.OutputChannel | undefined;
+let diagnosticRequestId = 0;
+function writeDiagnostic(line: string): void {
+  diagnosticOutput?.appendLine(line);
+}
 
 type ProviderName = 'ollama' | 'lmstudio';
 type ChatModelVisibilityMode = 'balanced' | 'strict' | 'all-chat-models';
@@ -121,9 +126,12 @@ interface OpenAiTool {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  diagnosticOutput = vscode.window.createOutputChannel('BBA LocalLLM Bridge Diagnostics');
   const provider = new LocalLlmChatProvider();
 
   context.subscriptions.push(
+    diagnosticOutput,
+    vscode.commands.registerCommand('bbaLocalLlmBridge.showDiagnostics', () => diagnosticOutput?.show(true)),
     vscode.lm.registerLanguageModelChatProvider(PROVIDER_ID, provider),
     vscode.commands.registerCommand('bbaLocalLlmBridge.manageProvider', () => manageProvider()),
     vscode.commands.registerCommand('bbaLocalLlmBridge.refreshModels', async () => {
@@ -146,6 +154,7 @@ export function deactivate(): void {}
 class LocalLlmChatProvider implements vscode.LanguageModelChatProvider {
   private modelCache: vscode.LanguageModelChatInformation[] | undefined;
   private cacheTime = 0;
+  constructor(private readonly diagnostic: (line: string) => void = writeDiagnostic) {}
 
   clearCache(): void {
     this.modelCache = undefined;
@@ -212,19 +221,42 @@ class LocalLlmChatProvider implements vscode.LanguageModelChatProvider {
   ): Promise<void> {
     const backend = getBackendForModel(model);
     const tools = getUsableTools(model, options.tools);
+    const requestId = ++diagnosticRequestId;
+    const log = (event: string, data: object) => this.diagnostic(JSON.stringify({ requestId, event, ...data }));
+    log('request', {
+      provider: backend.provider, model: backend.modelId,
+      toolMode: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',
+      advertisedToolCalling: model.capabilities.toolCalling,
+      offeredToolCount: options.tools?.length || 0, sentToolCount: tools.length,
+      sentTools: tools.map((tool) => ({ name: tool.name,
+        required: (tool.inputSchema as { required?: string[] } | undefined)?.required || [] })),
+      messageCount: messages.length
+    });
     const downstream = progress;
+    let textCharacters = 0;
+    let structuredCalls = 0;
     progress = { report(part) {
+      if (part instanceof vscode.LanguageModelTextPart) { textCharacters += part.value.length; }
       if (part instanceof vscode.LanguageModelToolCallPart) {
-        validateToolCall(part.name, part.input, tools);
+        structuredCalls++;
+        log('native-tool-call', { name: part.name });
+        try { validateToolCall(part.name, part.input, tools); }
+        catch (error) { log('validation-rejected', { name: part.name }); throw error; }
+        log('tool-call-emitted', { name: part.name });
       }
       downstream.report(part);
     } };
-    if (backend.provider === 'ollama') {
-      await streamOllamaChat(backend, messages, options, tools, progress, token);
-      return;
+    try {
+      if (backend.provider === 'ollama') {
+        await streamOllamaChat(backend, messages, options, tools, progress, token, log);
+      } else {
+        await streamLmStudioChat(backend, messages, options, tools, progress, token, log);
+      }
+      log('completed', { structuredCalls, textCharacters });
+    } catch (error) {
+      log('failed', { structuredCalls, textCharacters, cancelled: token.isCancellationRequested === true });
+      throw error;
     }
-
-    await streamLmStudioChat(backend, messages, options, tools, progress, token);
   }
 
   async provideTokenCount(
@@ -458,7 +490,8 @@ async function streamOllamaChat(
   options: vscode.ProvideLanguageModelChatResponseOptions,
   tools: readonly vscode.LanguageModelChatTool[],
   progress: vscode.Progress<vscode.LanguageModelResponsePart>,
-  token: vscode.CancellationToken
+  token: vscode.CancellationToken,
+  log: (event: string, data: object) => void
 ): Promise<void> {
   const backendMessages = convertMessages(messages, backend.provider);
   const requestUsesTools = tools.length > 0;
@@ -480,6 +513,7 @@ async function streamOllamaChat(
     });
   } catch (error) {
     if (shouldRetryWithoutTools(error, requestUsesTools && options.toolMode !== vscode.LanguageModelChatToolMode.Required)) {
+      log('unsupported-tools-fallback', {});
       response = await fetchWithTimeout(`${backend.baseUrl}/api/chat`, {
         method: 'POST',
         headers: {
@@ -531,7 +565,8 @@ async function streamLmStudioChat(
   options: vscode.ProvideLanguageModelChatResponseOptions,
   tools: readonly vscode.LanguageModelChatTool[],
   progress: vscode.Progress<vscode.LanguageModelResponsePart>,
-  token: vscode.CancellationToken
+  token: vscode.CancellationToken,
+  log: (event: string, data: object) => void
 ): Promise<void> {
   const requestUsesTools = tools.length > 0;
   const backendMessages = convertMessages(messages, backend.provider);
@@ -555,6 +590,7 @@ async function streamLmStudioChat(
     });
   } catch (error) {
     if (shouldRetryWithoutTools(error, requestUsesTools && options.toolMode !== vscode.LanguageModelChatToolMode.Required)) {
+      log('unsupported-tools-fallback', {});
       response = await fetchWithTimeout(`${backend.baseUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: {

@@ -27,3 +27,9 @@ Do not capture real workspace contents or API keys in committed logs. Mocked tes
 ## Automated result
 
 2026-10-09: TypeScript compilation and ESLint passed; 8 mocked regression tests passed; git diff --check passed. No live-server or VS Code extension-host acceptance performed.
+
+## Diagnostic Output channel
+
+Run `BBA LocalLLM Bridge: Show Diagnostics` in the Extension Development Host. Each request has an ID and logs provider/model, offered/sent tool count, names/required keys, tool mode, message count, native call names, validation rejection/emission, fallback and completion counts. Prompts, file contents, response text, argument values, endpoints and credentials are omitted. Output is local to the VS Code session; copy only the relevant request lines.
+
+User-reported 2026-10-09 live evidence: local compile/lint and 8 tests passed; qwen3:8b attached-file Ask returned BRIDGE-7429; Agent returned ordinary text with invented contents and no tool activity. Direct Ollama bridge_probe request returned native tool_calls with the correct code. Inspect Tool Support reported provider capability. Versions and actual Agent payload remain unknown; next step is tracing offered/sent tools and response part counts.

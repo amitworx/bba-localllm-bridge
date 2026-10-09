@@ -53,7 +53,8 @@
     "onCommand:bbaLocalLlmBridge.manageProvider",
     "onCommand:bbaLocalLlmBridge.refreshModels",
     "onCommand:bbaLocalLlmBridge.inspectToolSupport",
-    "onCommand:bbaLocalLlmBridge.configureChatVisibility"
+    "onCommand:bbaLocalLlmBridge.configureChatVisibility",
+    "onCommand:bbaLocalLlmBridge.showDiagnostics"
   ],
   "contributes": {
     "commands": [
@@ -72,6 +73,10 @@
       {
         "command": "bbaLocalLlmBridge.configureChatVisibility",
         "title": "BBA LocalLLM Bridge: Configure Chat Visibility"
+      },
+      {
+        "command": "bbaLocalLlmBridge.showDiagnostics",
+        "title": "BBA LocalLLM Bridge: Show Diagnostics"
       }
     ],
     "configuration": {

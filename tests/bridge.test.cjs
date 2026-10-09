@@ -83,3 +83,29 @@ test('native valid tool calls reach VS Code on both backends', async () => {
  }
  } finally { global.fetch = oldFetch; }
 });
+test('diagnostics distinguish text-only tool request and omit private content', async () => {
+ const oldFetch = global.fetch; const logs = [];
+ try {
+ global.fetch = async () => new Response(JSON.stringify({ message: { content: 'PRIVATE_RESPONSE' } }));
+ await new t.LocalLlmChatProvider(line => logs.push(JSON.parse(line))).provideLanguageModelChatResponse(
+ { id: 'ollama::qwen3:8b', capabilities: { toolCalling: true } },
+ [{ role: 1, content: [new Text('PRIVATE_PROMPT')] }], { tools: [tool], toolMode: 1 }, { report() {} },
+ { onCancellationRequested: () => ({ dispose() {} }) });
+ assert.equal(logs[0].sentToolCount, 1);
+ assert.deepEqual(logs[0].sentTools, [{ name: 'read_file', required: ['startLine'] }]);
+ assert.equal(logs.at(-1).structuredCalls, 0);
+ assert.equal(logs.at(-1).textCharacters, 16);
+ assert.ok(!JSON.stringify(logs).includes('PRIVATE_'));
+ } finally { global.fetch = oldFetch; }
+});
+test('diagnostics identify rejected native call without leaking argument values', async () => {
+ const oldFetch = global.fetch; const logs = [];
+ try {
+ global.fetch = async () => new Response(JSON.stringify({ message: { tool_calls: [{ function: { name: 'read_file', arguments: { secret: 'PRIVATE_VALUE' } } }] } }));
+ await assert.rejects(new t.LocalLlmChatProvider(line => logs.push(JSON.parse(line))).provideLanguageModelChatResponse(
+ { id: 'ollama::qwen', capabilities: { toolCalling: true } }, [], { tools: [tool], toolMode: 2 }, { report() {} },
+ { onCancellationRequested: () => ({ dispose() {} }) }));
+ assert.deepEqual(logs.map(x => x.event), ['request', 'native-tool-call', 'validation-rejected', 'failed']);
+ assert.ok(!JSON.stringify(logs).includes('PRIVATE_VALUE'));
+ } finally { global.fetch = oldFetch; }
+});
