@@ -174,3 +174,25 @@ test('request size diagnostics expose counts, label estimates, and omit content'
  assert.match(data.estimateMethod, /not a tokenizer/);
  assert.ok(!JSON.stringify(data).includes('PRIVATE_'));
 });
+test('oversized tool requests fail before HTTP; explicit guard override sends unchanged tools', async () => {
+ const oldFetch = global.fetch; const oldConfiguration = vscode.workspace.getConfiguration;
+ let guard = true; let requests = 0; let body; const logs = [];
+ try {
+ vscode.workspace.getConfiguration = () => ({ get: (key, fallback) => key === 'ollama.guardToolContext' ? guard : fallback });
+ global.fetch = async (_, options) => { requests++; body = JSON.parse(options.body); return new Response(JSON.stringify({ done: true, message: { content: 'ok' } })+'\n'); };
+ const provider = new t.LocalLlmChatProvider(line => logs.push(JSON.parse(line)));
+ const model = { id: 'ollama::qwen', capabilities: { toolCalling: true } };
+ const messages = [{ role: 1, content: [new Text('PRIVATE_CONTENT'.repeat(2000))] }];
+ const options = { tools: [tool], toolMode: 1 };
+ const token = { onCancellationRequested: () => ({ dispose() {} }) };
+ await assert.rejects(provider.provideLanguageModelChatResponse(model, messages, options, { report() {} }, token), /rough estimate/);
+ assert.equal(requests, 0); assert.ok(logs.some(x => x.event === 'context-budget-rejected'));
+ assert.ok(!JSON.stringify(logs).includes('PRIVATE_CONTENT'));
+ guard = false;
+ await provider.provideLanguageModelChatResponse(model, messages, options, { report() {} }, token);
+ assert.equal(requests, 1); assert.equal(body.tools[0].function.name, 'read_file');
+ guard = true;
+ await provider.provideLanguageModelChatResponse(model, messages, { toolMode: 1 }, { report() {} }, token);
+ assert.equal(requests, 2); assert.equal(body.tools, undefined);
+ } finally { global.fetch = oldFetch; vscode.workspace.getConfiguration = oldConfiguration; }
+});

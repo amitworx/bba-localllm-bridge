@@ -185,6 +185,11 @@
           "minimum": 64,
           "maximum": 8192,
           "description": "Generation token limit for Ollama requests containing tools, including thinking tokens. Reaching the limit fails without emitting buffered calls. Does not limit ordinary Ask responses."
+        },
+        "bbaLocalLlmBridge.ollama.guardToolContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reject tool-bearing Ollama requests before HTTP when the rough serialized-character input estimate exceeds contextTokens. This is not an exact tokenizer count and may reject requests that would fit or miss ones that do not. Disable only for controlled testing. Ordinary Ask requests are unaffected."
         }
       }
     },

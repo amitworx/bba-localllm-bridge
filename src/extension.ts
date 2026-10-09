@@ -25,6 +25,7 @@ interface ProviderConfig {
     toolCallingModels: string[];
     contextTokens: number;
     toolMaxTokens: number;
+    guardToolContext: boolean;
   };
   lmStudio: {
     enabled: boolean;
@@ -367,7 +368,8 @@ function getConfig(): ProviderConfig {
       models: config.get<string[]>('ollama.models', []),
       toolCallingModels: config.get<string[]>('ollama.toolCallingModels', []),
       contextTokens: config.get<number>('ollama.contextTokens', 4096),
-      toolMaxTokens: config.get<number>('ollama.toolMaxTokens', 1024)
+      toolMaxTokens: config.get<number>('ollama.toolMaxTokens', 1024),
+      guardToolContext: config.get<boolean>('ollama.guardToolContext', true)
     },
     lmStudio: {
       enabled: config.get<boolean>('lmStudio.enabled', true),
@@ -508,7 +510,12 @@ async function streamOllamaChat(
   const requestUsesTools = tools.length > 0;
   const outboundMessages = maybeForceToolModeForOllama(backendMessages, options.toolMode, requestUsesTools);
   const outboundTools = requestUsesTools ? convertTools(tools) : undefined;
-  log('request-size', requestSizeDiagnostic(outboundMessages, outboundTools, getConfig().ollama.contextTokens));
+  const size = requestSizeDiagnostic(outboundMessages, outboundTools, getConfig().ollama.contextTokens);
+  log('request-size', size);
+  if (requestUsesTools && getConfig().ollama.guardToolContext && size.estimateExceedsContext) {
+    log('context-budget-rejected', { estimatedInputTokens: size.estimatedInputTokens, configuredContextTokens: size.configuredContextTokens });
+    throw new Error(`Ollama tool request is estimated at ${size.estimatedInputTokens} input tokens, exceeding the configured ${size.configuredContextTokens}-token context. This is a rough estimate, not a tokenizer count. Start a fresh chat, explicitly select fewer tools with diagnosticToolFilter, or configure ollama.contextTokens for your machine. ollama.guardToolContext can disable this estimate-based guard for controlled testing. No tools were removed and no request was sent.`);
+  }
   let response: Response;
   try {
     response = await fetchWithTimeout(`${backend.baseUrl}/api/chat`, {
@@ -608,7 +615,7 @@ async function readOllamaToolStream(
   reportOllamaResponse({ tool_calls: calls }, progress);
 }
 
-function requestSizeDiagnostic(messages: ProviderChatMessage[], tools: object[] | undefined, contextTokens: number): object {
+function requestSizeDiagnostic(messages: ProviderChatMessage[], tools: object[] | undefined, contextTokens: number): { messageBytes: number; toolSchemaBytes: number; estimatedInputTokens: number; configuredContextTokens: number; estimateExceedsContext: boolean; estimateMethod: string } {
   const messageJson = JSON.stringify(messages);
   const toolJson = JSON.stringify(tools || []);
   const estimatedInputTokens = Math.ceil((messageJson.length + toolJson.length) / 4);
