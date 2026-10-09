@@ -16,6 +16,7 @@ type ChatModelVisibilityMode = 'balanced' | 'strict' | 'all-chat-models';
 interface ProviderConfig {
   defaultProvider: ProviderName;
   requestTimeoutMs: number;
+  diagnosticToolFilter: string[];
   chatModelVisibility: ChatModelVisibilityMode;
   ollama: {
     enabled: boolean;
@@ -220,13 +221,18 @@ class LocalLlmChatProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken
   ): Promise<void> {
     const backend = getBackendForModel(model);
-    const tools = getUsableTools(model, options.tools);
+    const filter = getConfig().diagnosticToolFilter;
+    const tools = getUsableTools(model, options.tools, filter);
+    if (options.tools?.length && filter.length && !tools.length) {
+      this.diagnostic(JSON.stringify({ event: 'tool-filter-no-match', offeredToolCount: options.tools.length }));
+      throw new Error('Diagnostic tool filter matched no usable tools. Use exact diagnostic tool names or clear the filter.');
+    }
     const requestId = ++diagnosticRequestId;
     const log = (event: string, data: object) => this.diagnostic(JSON.stringify({ requestId, event, ...data }));
     log('request', {
       provider: backend.provider, model: backend.modelId,
       toolMode: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',
-      advertisedToolCalling: model.capabilities.toolCalling,
+      advertisedToolCalling: model.capabilities.toolCalling, diagnosticToolFilter: filter,
       offeredToolCount: options.tools?.length || 0, sentToolCount: tools.length,
       sentTools: tools.map((tool) => ({ name: tool.name,
         required: (tool.inputSchema as { required?: string[] } | undefined)?.required || [] })),
@@ -351,6 +357,7 @@ function getConfig(): ProviderConfig {
   return {
     defaultProvider: config.get<ProviderName>('defaultProvider', 'ollama'),
     requestTimeoutMs: config.get<number>('requestTimeoutMs', 120000),
+    diagnosticToolFilter: config.get<string[]>('diagnosticToolFilter', []),
     chatModelVisibility: config.get<ChatModelVisibilityMode>('chatModelVisibility', 'balanced'),
     ollama: {
       enabled: config.get<boolean>('ollama.enabled', true),
@@ -750,12 +757,13 @@ function convertRole(role: vscode.LanguageModelChatMessageRole): string {
 
 function getUsableTools(
   model: vscode.LanguageModelChatInformation,
-  tools: readonly vscode.LanguageModelChatTool[] | undefined
+  tools: readonly vscode.LanguageModelChatTool[] | undefined,
+  filter: readonly string[] = []
 ): readonly vscode.LanguageModelChatTool[] {
   if (!model.capabilities.toolCalling || !tools?.length) {
     return [];
   }
-  return tools;
+  return filter.length ? tools.filter((tool) => filter.includes(tool.name)) : tools;
 }
 
 function convertTools(
@@ -1301,4 +1309,4 @@ function findEventBoundary(buffer: string): number {
   return Math.min(unixBoundary, windowsBoundary);
 }
 
-export const testing = { convertMessages, convertTools, normalizeToolArguments, validateToolCall, evaluateToolCalling, shouldRetryWithoutTools, readNdjsonStream, readSseStream, LocalLlmChatProvider };
+export const testing = { getUsableTools, convertMessages, convertTools, normalizeToolArguments, validateToolCall, evaluateToolCalling, shouldRetryWithoutTools, readNdjsonStream, readSseStream, LocalLlmChatProvider };

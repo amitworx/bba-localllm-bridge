@@ -109,3 +109,37 @@ test('diagnostics identify rejected native call without leaking argument values'
  assert.ok(!JSON.stringify(logs).includes('PRIVATE_VALUE'));
  } finally { global.fetch = oldFetch; }
 });
+test('diagnostic filter is disabled by default and preserves selected schema', () => {
+ const model = { capabilities: { toolCalling: true } };
+ const tools = [tool, { name: 'send_to_terminal', inputSchema: { type: 'object' } }];
+ assert.equal(t.getUsableTools(model, tools), tools);
+ const selected = t.getUsableTools(model, tools, ['read_file']);
+ assert.equal(selected.length, 1);
+ assert.equal(selected[0], tool);
+ assert.equal(t.convertTools(selected)[0].function.parameters, tool.inputSchema);
+ assert.deepEqual(t.getUsableTools(model, undefined, ['read_file']), []);
+ assert.deepEqual(t.getUsableTools({ capabilities: { toolCalling: false } }, tools, ['read_file']), []);
+});
+test('diagnostic filter sends only read_file and rejects a typo before HTTP', async () => {
+ const oldFetch = global.fetch;
+ const oldConfiguration = vscode.workspace.getConfiguration;
+ let filter = ['read_file']; let body; let requests = 0;
+ try {
+ vscode.workspace.getConfiguration = () => ({ get: (key, fallback) => key === 'diagnosticToolFilter' ? filter : fallback });
+ global.fetch = async (_, options) => { requests++; body = JSON.parse(options.body); return new Response(JSON.stringify({ message: { content: 'test' } })); };
+ const provider = new t.LocalLlmChatProvider();
+ const model = { id: 'ollama::qwen', capabilities: { toolCalling: true } };
+ const options = { tools: [tool, { name: 'send_to_terminal', description: 'terminal' }], toolMode: 1 };
+ const token = { onCancellationRequested: () => ({ dispose() {} }) };
+ await provider.provideLanguageModelChatResponse(model, [], options, { report() {} }, token);
+ assert.deepEqual(body.tools.map(x => x.function.name), ['read_file']);
+ assert.deepEqual(body.tools[0].function.parameters, tool.inputSchema);
+ filter = ['readFile'];
+ await assert.rejects(provider.provideLanguageModelChatResponse(model, [], options, { report() {} }, token), /matched no usable tools/);
+ assert.equal(requests, 1);
+ // Attached Ask has no tools; an enabled filter must leave it working.
+ global.fetch = async (_, options) => { body = JSON.parse(options.body); return new Response(JSON.stringify({ message: { content: 'BRIDGE-7429' } })+'\n'); };
+ await provider.provideLanguageModelChatResponse(model, [{ role: 1, content: [new Text('Attached fixture')] }], { toolMode: 1 }, { report() {} }, token);
+ assert.equal(body.tools, undefined); assert.equal(body.messages[0].content, 'Attached fixture');
+ } finally { global.fetch = oldFetch; vscode.workspace.getConfiguration = oldConfiguration; }
+});

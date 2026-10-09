@@ -163,6 +163,15 @@
             "type": "string"
           },
           "description": "Legacy preference only. This allowlist is not proof of tool capability and does not enable tools without provider metadata."
+        },
+        "bbaLocalLlmBridge.diagnosticToolFilter": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "scope": "window",
+          "description": "Temporary diagnostic filter: send only these exact tool names from tools supplied by VS Code (for example read_file). Empty disables filtering. Does not enable tool capability or add tools. Clear after testing."
         }
       }
     },
