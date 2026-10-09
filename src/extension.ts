@@ -23,6 +23,8 @@ interface ProviderConfig {
     baseUrl: string;
     models: string[];
     toolCallingModels: string[];
+    contextTokens: number;
+    toolMaxTokens: number;
   };
   lmStudio: {
     enabled: boolean;
@@ -260,7 +262,7 @@ class LocalLlmChatProvider implements vscode.LanguageModelChatProvider {
       }
       log('completed', { structuredCalls, textCharacters });
     } catch (error) {
-      log('failed', { structuredCalls, textCharacters, cancelled: token.isCancellationRequested === true });
+      log('failed', { structuredCalls, textCharacters, cancelled: token.isCancellationRequested === true, ...safeFailureDetails(error) });
       throw error;
     }
   }
@@ -363,7 +365,9 @@ function getConfig(): ProviderConfig {
       enabled: config.get<boolean>('ollama.enabled', true),
       baseUrl: config.get<string>('ollama.baseUrl', 'http://127.0.0.1:11434'),
       models: config.get<string[]>('ollama.models', []),
-      toolCallingModels: config.get<string[]>('ollama.toolCallingModels', [])
+      toolCallingModels: config.get<string[]>('ollama.toolCallingModels', []),
+      contextTokens: config.get<number>('ollama.contextTokens', 4096),
+      toolMaxTokens: config.get<number>('ollama.toolMaxTokens', 1024)
     },
     lmStudio: {
       enabled: config.get<boolean>('lmStudio.enabled', true),
@@ -435,7 +439,7 @@ async function discoverOllamaModels(
       name: entry.name,
       family: guessFamily(entry.name),
       version: sanitizeVersion(entry.modified_at || entry.digest || 'local'),
-      maxInputTokens: 32768,
+      maxInputTokens: config.ollama.contextTokens,
       maxOutputTokens: 8192,
       tooltip: `Ollama (${trimTrailingSlash(config.ollama.baseUrl)})`,
       detail: 'Local Ollama model',
@@ -513,7 +517,8 @@ async function streamOllamaChat(
         model: backend.modelId,
         messages: maybeForceToolModeForOllama(backendMessages, options.toolMode, requestUsesTools),
         tools: requestUsesTools ? convertTools(tools) : undefined,
-        stream: !requestUsesTools
+        stream: true,
+        options: { num_ctx: getConfig().ollama.contextTokens, ...(requestUsesTools ? { num_predict: getConfig().ollama.toolMaxTokens } : {}) }
       }),
       timeoutMs: getConfig().requestTimeoutMs,
       token
@@ -529,7 +534,7 @@ async function streamOllamaChat(
         body: JSON.stringify({
           model: backend.modelId,
           messages: backendMessages,
-          stream: true
+          stream: true, options: { num_ctx: getConfig().ollama.contextTokens }
         }),
         timeoutMs: getConfig().requestTimeoutMs,
         token
@@ -546,24 +551,65 @@ async function streamOllamaChat(
   }
 
   if (requestUsesTools) {
-    const json = await response.json() as {
-      message?: {
-        content?: string;
-        tool_calls?: Array<{
-          function?: {
-            name?: string;
-            arguments?: object;
-          };
-        }>;
-      };
-    };
-    reportOllamaResponse(json.message, progress);
+    await readOllamaToolStream(response, progress, log);
     return;
   }
-
-  await readNdjsonStream(response, (json: { message?: { content?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: object } }> } }) => {
+  await readNdjsonStream(response, (json: { error?: string; message?: { content?: string } }) => {
+    if (json.error) { throw new Error('Ollama returned a stream error.'); }
     reportOllamaResponse(json.message, progress);
   });
+}
+
+interface OllamaToolChunk {
+  error?: string;
+  done?: boolean;
+  done_reason?: string;
+  message?: { content?: string; thinking?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: object } }> };
+}
+
+async function readOllamaToolStream(
+  response: Response,
+  progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+  log: (event: string, data: object) => void
+): Promise<void> {
+  const calls: NonNullable<NonNullable<OllamaToolChunk['message']>['tool_calls']> = [];
+  let completed = false;
+  let chunks = 0;
+  let thinkingCharacters = 0;
+  await readNdjsonStream<OllamaToolChunk>(response, (chunk) => {
+    if (completed) { throw new Error('Ollama sent data after stream completion.'); }
+    if (chunk.error) { throw new Error('Ollama returned a stream error.'); }
+    chunks++;
+    thinkingCharacters += chunk.message?.thinking?.length || 0;
+    if (chunks === 1 || chunks % 100 === 0) {
+      log('stream-progress', { chunks, thinkingCharacters, bufferedToolCalls: calls.length });
+    }
+    if (chunk.message?.content) {
+      progress.report(new vscode.LanguageModelTextPart(chunk.message.content));
+    }
+    calls.push(...(chunk.message?.tool_calls || []));
+    if (chunk.done) {
+      completed = true;
+      log('stream-finished', { chunks, thinkingCharacters, bufferedToolCalls: calls.length, generationLimitReached: chunk.done_reason === 'length' });
+      if (chunk.done_reason === 'length') {
+        throw new Error('Ollama tool generation reached its token limit. No buffered tool calls were emitted.');
+      }
+    }
+  });
+  if (!completed) { throw new Error('Ollama tool stream ended before its completion marker.'); }
+  // Only complete streams can emit executable calls. Schema checks still run at the provider boundary.
+  reportOllamaResponse({ tool_calls: calls }, progress);
+}
+
+function safeFailureDetails(error: unknown): { errorType: string; causeCode?: string; httpStatus?: number } {
+  const codes = new Set(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ABORT_ERR']);
+  const candidate = error as { cause?: { code?: unknown } } | null;
+  const code = candidate?.cause?.code;
+  return {
+    errorType: error instanceof TypeError ? 'type-error' : error instanceof SyntaxError ? 'parse-error' : 'request-error',
+    ...(typeof code === 'string' && codes.has(code) ? { causeCode: code } : {}),
+    ...(error instanceof HttpError ? { httpStatus: error.status } : {})
+  };
 }
 
 async function streamLmStudioChat(
@@ -1184,6 +1230,7 @@ async function readNdjsonStream<T>(response: Response, onLine: (data: T) => void
   const decoder = new TextDecoder();
   let buffer = '';
 
+  try {
   while (true) {
     const { done, value } = await reader.read();
     if (done) {
@@ -1206,6 +1253,10 @@ async function readNdjsonStream<T>(response: Response, onLine: (data: T) => void
   const trailing = buffer.trim();
   if (trailing) {
     onLine(JSON.parse(trailing) as T);
+  }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 }
 
@@ -1309,4 +1360,4 @@ function findEventBoundary(buffer: string): number {
   return Math.min(unixBoundary, windowsBoundary);
 }
 
-export const testing = { getUsableTools, convertMessages, convertTools, normalizeToolArguments, validateToolCall, evaluateToolCalling, shouldRetryWithoutTools, readNdjsonStream, readSseStream, LocalLlmChatProvider };
+export const testing = { readOllamaToolStream, safeFailureDetails, getUsableTools, convertMessages, convertTools, normalizeToolArguments, validateToolCall, evaluateToolCalling, shouldRetryWithoutTools, readNdjsonStream, readSseStream, LocalLlmChatProvider };

@@ -60,7 +60,7 @@ test('Ask attached text and plain JSON remain text on Ollama and LM Studio', asy
 test('Agent invalid call fails before VS Code receives executable part', async () => {
  const oldFetch = global.fetch; const parts = [];
  try {
- global.fetch = async () => new Response(JSON.stringify({ message: { tool_calls: [{ function: { name: 'read_file', arguments: {} } }] } }));
+ global.fetch = async () => new Response(JSON.stringify({ done: true, message: { tool_calls: [{ function: { name: 'read_file', arguments: {} } }] } }));
  await assert.rejects(new t.LocalLlmChatProvider().provideLanguageModelChatResponse({ id: 'ollama::qwen', capabilities: { toolCalling: true } }, [],
  { tools: [tool], toolMode: 2 }, { report: p => parts.push(p) }, { onCancellationRequested: () => ({ dispose() {} }) }), /startLine/);
  assert.equal(parts.length, 0);
@@ -75,7 +75,7 @@ test('native valid tool calls reach VS Code on both backends', async () => {
  for (const provider of ['ollama', 'lmstudio']) {
  const parts = [];
  const call = { id: 'native-1', type: 'function', function: { name: 'read_file', arguments: provider === 'ollama' ? { startLine: 1 } : '{"startLine":1}' } };
- global.fetch = async () => new Response(JSON.stringify(provider === 'ollama' ? { message: { tool_calls: [call] } } : { choices: [{ message: { tool_calls: [call] } }] }));
+ global.fetch = async () => new Response(JSON.stringify(provider === 'ollama' ? { done: true, message: { tool_calls: [call] } } : { choices: [{ done: true, message: { tool_calls: [call] } }] }));
  await new t.LocalLlmChatProvider().provideLanguageModelChatResponse({ id: provider+'::qwen', capabilities: { toolCalling: true } }, [],
  { tools: [tool], toolMode: 2 }, { report: p => parts.push(p) }, { onCancellationRequested: () => ({ dispose() {} }) });
  assert.equal(parts.length, 1); assert.ok(parts[0] instanceof Call); assert.deepEqual(parts[0].input, { startLine: 1 });
@@ -86,7 +86,7 @@ test('native valid tool calls reach VS Code on both backends', async () => {
 test('diagnostics distinguish text-only tool request and omit private content', async () => {
  const oldFetch = global.fetch; const logs = [];
  try {
- global.fetch = async () => new Response(JSON.stringify({ message: { content: 'PRIVATE_RESPONSE' } }));
+ global.fetch = async () => new Response(JSON.stringify({ done: true, message: { content: 'PRIVATE_RESPONSE' } }));
  await new t.LocalLlmChatProvider(line => logs.push(JSON.parse(line))).provideLanguageModelChatResponse(
  { id: 'ollama::qwen3:8b', capabilities: { toolCalling: true } },
  [{ role: 1, content: [new Text('PRIVATE_PROMPT')] }], { tools: [tool], toolMode: 1 }, { report() {} },
@@ -101,11 +101,11 @@ test('diagnostics distinguish text-only tool request and omit private content', 
 test('diagnostics identify rejected native call without leaking argument values', async () => {
  const oldFetch = global.fetch; const logs = [];
  try {
- global.fetch = async () => new Response(JSON.stringify({ message: { tool_calls: [{ function: { name: 'read_file', arguments: { secret: 'PRIVATE_VALUE' } } }] } }));
+ global.fetch = async () => new Response(JSON.stringify({ done: true, message: { tool_calls: [{ function: { name: 'read_file', arguments: { secret: 'PRIVATE_VALUE' } } }] } }));
  await assert.rejects(new t.LocalLlmChatProvider(line => logs.push(JSON.parse(line))).provideLanguageModelChatResponse(
  { id: 'ollama::qwen', capabilities: { toolCalling: true } }, [], { tools: [tool], toolMode: 2 }, { report() {} },
  { onCancellationRequested: () => ({ dispose() {} }) }));
- assert.deepEqual(logs.map(x => x.event), ['request', 'native-tool-call', 'validation-rejected', 'failed']);
+ assert.deepEqual(logs.map(x => x.event), ['request', 'stream-progress', 'stream-finished', 'native-tool-call', 'validation-rejected', 'failed']);
  assert.ok(!JSON.stringify(logs).includes('PRIVATE_VALUE'));
  } finally { global.fetch = oldFetch; }
 });
@@ -126,13 +126,14 @@ test('diagnostic filter sends only read_file and rejects a typo before HTTP', as
  let filter = ['read_file']; let body; let requests = 0;
  try {
  vscode.workspace.getConfiguration = () => ({ get: (key, fallback) => key === 'diagnosticToolFilter' ? filter : fallback });
- global.fetch = async (_, options) => { requests++; body = JSON.parse(options.body); return new Response(JSON.stringify({ message: { content: 'test' } })); };
+ global.fetch = async (_, options) => { requests++; body = JSON.parse(options.body); return new Response(JSON.stringify({ done: true, message: { content: 'test' } })); };
  const provider = new t.LocalLlmChatProvider();
  const model = { id: 'ollama::qwen', capabilities: { toolCalling: true } };
  const options = { tools: [tool, { name: 'send_to_terminal', description: 'terminal' }], toolMode: 1 };
  const token = { onCancellationRequested: () => ({ dispose() {} }) };
  await provider.provideLanguageModelChatResponse(model, [], options, { report() {} }, token);
  assert.deepEqual(body.tools.map(x => x.function.name), ['read_file']);
+ assert.equal(body.stream, true); assert.equal(body.options.num_predict, 1024); assert.equal(body.options.num_ctx, 4096);
  assert.deepEqual(body.tools[0].function.parameters, tool.inputSchema);
  filter = ['readFile'];
  await assert.rejects(provider.provideLanguageModelChatResponse(model, [], options, { report() {} }, token), /matched no usable tools/);
@@ -140,6 +141,28 @@ test('diagnostic filter sends only read_file and rejects a typo before HTTP', as
  // Attached Ask has no tools; an enabled filter must leave it working.
  global.fetch = async (_, options) => { body = JSON.parse(options.body); return new Response(JSON.stringify({ message: { content: 'BRIDGE-7429' } })+'\n'); };
  await provider.provideLanguageModelChatResponse(model, [{ role: 1, content: [new Text('Attached fixture')] }], { toolMode: 1 }, { report() {} }, token);
- assert.equal(body.tools, undefined); assert.equal(body.messages[0].content, 'Attached fixture');
+ assert.equal(body.tools, undefined); assert.equal(body.options.num_predict, undefined); assert.equal(body.messages[0].content, 'Attached fixture');
  } finally { global.fetch = oldFetch; vscode.workspace.getConfiguration = oldConfiguration; }
+});
+test('Ollama streaming handles split UTF-8 chunks and emits calls only after completion', async () => {
+ const parts = []; const logs = [];
+ const payload = JSON.stringify({ message: { thinking: 'PRIVATE_THINKING', content: 'héllo', tool_calls: [{ function: { name: 'read_file', arguments: { startLine: 1 } } }] } })+'\n'+JSON.stringify({ done: true })+'\n';
+ const bytes = new TextEncoder().encode(payload);
+ const response = new Response(new ReadableStream({ start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close(); } }));
+ await t.readOllamaToolStream(response, { report: p => parts.push(p) }, (event, data) => logs.push({ event, ...data }));
+ assert.equal(parts[0].value, 'héllo'); assert.ok(parts[1] instanceof Call);
+ assert.ok(!JSON.stringify(logs).includes('PRIVATE_THINKING'));
+});
+test('truncated or token-limited Ollama streams never emit buffered tool calls', async () => {
+ const chunk = { message: { tool_calls: [{ function: { name: 'read_file', arguments: { startLine: 1 } } }] } };
+ for (const tail of ['', '\n'+JSON.stringify({ done: true, done_reason: 'length' })]) {
+ const parts = [];
+ await assert.rejects(t.readOllamaToolStream(new Response(JSON.stringify(chunk)+tail), { report: p => parts.push(p) }, () => {}));
+ assert.equal(parts.length, 0);
+ }
+});
+test('safe fetch diagnostics expose known cause codes without messages or secrets', () => {
+ const error = new TypeError('PRIVATE_ENDPOINT'); error.cause = { code: 'UND_ERR_HEADERS_TIMEOUT', message: 'PRIVATE_SECRET' };
+ assert.deepEqual(t.safeFailureDetails(error), { errorType: 'type-error', causeCode: 'UND_ERR_HEADERS_TIMEOUT' });
+ error.cause.code = 'PRIVATE_SECRET'; assert.equal(t.safeFailureDetails(error).causeCode, undefined);
 });

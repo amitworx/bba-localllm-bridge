@@ -39,3 +39,9 @@ User-reported 2026-10-09 live evidence: local compile/lint and 8 tests passed; q
 Set `bbaLocalLlmBridge.diagnosticToolFilter` to `["read_file"]` in the test host settings. The filter intersects VS Code's offered tools by exact backend name, preserves their schemas and does not enable model capability. Empty (default) leaves tool requests unchanged; tool-free Ask stays unchanged. A nonempty filter with no usable match fails explicitly before HTTP rather than silently removing tools. Confirm sentToolCount=1 and read_file in diagnostics. Clear the setting to [] after the controlled test.
 
 Further user evidence: 58-tool Agent request hit request timeout; longer timeout produced a native send_to_terminal call with an invalid UUID, rejected by schema validation. Subsequent 13- and 34-tool requests completed as text only. Tool-picker changes did not isolate read_file. These are observations, not proof that tool count caused the failures.
+
+## Transport follow-up
+
+User server logs showed generation beyond 4000 tokens, a 4096-token context shift and client disconnect after 5m2s while Ollama stayed healthy. The underlying client cause was not captured; a separate header timeout is a hypothesis. Ollama tool requests now stream NDJSON, log chunk/thinking character counts only, and limit generation to 1024 tokens by default. No calls are emitted from truncated or token-limited streams. The limit can be raised with ollama.toolMaxTokens; normal Ask has no new output cap. Context is explicitly requested via num_ctx and advertised consistently through ollama.contextTokens. Known fetch cause codes and HTTP status are logged without raw messages.
+
+Official protocol references: https://docs.ollama.com/api/chat and https://docs.ollama.com/capabilities/tool-calling . Live acceptance of these changes remains pending.
