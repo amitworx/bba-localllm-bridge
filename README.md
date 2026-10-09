@@ -69,55 +69,19 @@ Try this:
 4. Re-open the Chat model picker.
 5. If needed, reload VS Code.
 
-If you still want the most permissive behavior, choose `All Chat Models`.
+Visibility preferences do not enable tool calling.
 
 ## Tool Calling
 
-Tool calling support depends on the model you select.
+Ollama capability metadata comes from `/api/show`. LM Studio uses capability metadata when supplied by `/v1/models`; absent metadata remains unknown. Provider reports are not live verification. Visibility and legacy tool allowlists never establish tool support.
 
-- If the selected model supports tool use, VS Code can use it in agent-style flows that require tools.
-- If the selected model does not support tool use well, it may still appear for normal chat but not behave reliably for tool-based tasks.
-- LM Studio can expose tool-use capability metadata for some models.
-- This extension can also be configured to show likely chat models more aggressively in the Chat picker, while retrying normal chat requests without tools if a backend rejects tool payloads.
+Ask requests without tools retain text streaming and attached text. Native structured tool calls are validated against the offered JSON schemas before reaching VS Code. JSON printed as ordinary content remains text. The bridge never invents `startLine` or other missing arguments.
 
-If you want strict control, set these allowlists:
-
-- `bbaLocalLlmBridge.ollama.toolCallingModels`
-- `bbaLocalLlmBridge.lmStudio.toolCallingModels`
-
-For easier setup, use:
-
-- `BBA LocalLLM Bridge: Configure Chat Visibility`
-
-Visibility modes:
-
-- `balanced`: recommended for most users, shows likely chat models while keeping a safe retry path
-- `strict`: only advertises tool support from metadata or explicit allowlists
-- `all-chat-models`: shows every non-embedding model in Chat
+LM Studio histories preserve `tool_call_id` and JSON-string arguments; Ollama histories use object arguments and tool names. Required-tool requests never silently retry as chat. Optional tool requests fall back only on explicit unsupported-tool HTTP 400 errors.
 
 ## Troubleshooting
 
-### A normal chat prompt fails with `400 Bad Request`
-
-Some local models reject tool-enabled request payloads even when they can answer normal chat prompts.
-
-This extension now retries normal chat without tools when that happens, but if you still see it:
-
-1. Run `BBA LocalLLM Bridge: Configure Chat Visibility`
-2. Choose `Balanced (Recommended)`
-3. Run `BBA LocalLLM Bridge: Refresh Models`
-4. Try the prompt again
-
-### A model should support tools but does not appear as tool-capable
-
-Use:
-
-- `BBA LocalLLM Bridge: Inspect Tool Support`
-
-If needed, explicitly allowlist the model:
-
-- `bbaLocalLlmBridge.ollama.toolCallingModels`
-- `bbaLocalLlmBridge.lmStudio.toolCallingModels`
+Run **Inspect Tool Support** and **Refresh Models** after server/model changes. If a call fails validation, record the tool name/schema and redacted argument shape. A CLI answer does not verify native tool calling. See [verification](docs/VERIFICATION.md) for the live test matrix and current limits.
 
 ## Project structure
 

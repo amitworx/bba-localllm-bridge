@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import Ajv from 'ajv';
 
 const PROVIDER_ID = 'bba-local-llm-bridge';
 const CONFIG_SECTION = 'bbaLocalLlmBridge';
@@ -89,6 +90,7 @@ interface ProviderChatMessage {
   content?: string;
   tool_calls?: ProviderToolCall[];
   tool_name?: string;
+  tool_call_id?: string;
 }
 
 interface ProviderToolCall {
@@ -210,6 +212,13 @@ class LocalLlmChatProvider implements vscode.LanguageModelChatProvider {
   ): Promise<void> {
     const backend = getBackendForModel(model);
     const tools = getUsableTools(model, options.tools);
+    const downstream = progress;
+    progress = { report(part) {
+      if (part instanceof vscode.LanguageModelToolCallPart) {
+        validateToolCall(part.name, part.input, tools);
+      }
+      downstream.report(part);
+    } };
     if (backend.provider === 'ollama') {
       await streamOllamaChat(backend, messages, options, tools, progress, token);
       return;
@@ -359,6 +368,16 @@ async function discoverOllamaModels(
     token
   });
 
+  const capabilities = new Map<string, string[]>();
+  await Promise.all((response.models || []).map(async (entry) => {
+    try {
+      const shown = await fetchJson<{ capabilities?: string[] }>(`${trimTrailingSlash(config.ollama.baseUrl)}/api/show`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: entry.name }), timeoutMs: config.requestTimeoutMs, token
+      });
+      capabilities.set(entry.name, shown.capabilities || []);
+    } catch { /* Failed metadata lookup leaves Ask available, tools unknown. */ }
+  }));
   const configured = normalizeAllowlist(config.ollama.models);
   const models = Array.isArray(response.models) ? response.models : [];
 
@@ -369,7 +388,7 @@ async function discoverOllamaModels(
         provider: 'ollama',
         modelId: entry.name,
         allowlist: config.ollama.toolCallingModels,
-        metadataCapabilities: entry.details?.families || (entry.details?.family ? [entry.details.family] : []),
+        metadataCapabilities: capabilities.get(entry.name),
         visibilityMode: config.chatModelVisibility
       });
       return {
@@ -441,7 +460,7 @@ async function streamOllamaChat(
   progress: vscode.Progress<vscode.LanguageModelResponsePart>,
   token: vscode.CancellationToken
 ): Promise<void> {
-  const backendMessages = convertMessages(messages);
+  const backendMessages = convertMessages(messages, backend.provider);
   const requestUsesTools = tools.length > 0;
   let response: Response;
   try {
@@ -460,7 +479,7 @@ async function streamOllamaChat(
       token
     });
   } catch (error) {
-    if (shouldRetryWithoutTools(error, requestUsesTools)) {
+    if (shouldRetryWithoutTools(error, requestUsesTools && options.toolMode !== vscode.LanguageModelChatToolMode.Required)) {
       response = await fetchWithTimeout(`${backend.baseUrl}/api/chat`, {
         method: 'POST',
         headers: {
@@ -515,7 +534,7 @@ async function streamLmStudioChat(
   token: vscode.CancellationToken
 ): Promise<void> {
   const requestUsesTools = tools.length > 0;
-  const backendMessages = convertMessages(messages);
+  const backendMessages = convertMessages(messages, backend.provider);
   let response: Response;
   try {
     response = await fetchWithTimeout(`${backend.baseUrl}/v1/chat/completions`, {
@@ -535,7 +554,7 @@ async function streamLmStudioChat(
       token
     });
   } catch (error) {
-    if (shouldRetryWithoutTools(error, requestUsesTools)) {
+    if (shouldRetryWithoutTools(error, requestUsesTools && options.toolMode !== vscode.LanguageModelChatToolMode.Required)) {
       response = await fetchWithTimeout(`${backend.baseUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: {
@@ -620,7 +639,8 @@ async function streamLmStudioChat(
 }
 
 function convertMessages(
-  messages: readonly vscode.LanguageModelChatRequestMessage[]
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  provider: ProviderName = 'ollama'
 ): ProviderChatMessage[] {
   const converted: ProviderChatMessage[] = [];
   const toolNames = new Map<string, string>();
@@ -657,7 +677,7 @@ function convertMessages(
           type: 'function',
           function: {
             name: part.name,
-            arguments: part.input
+            arguments: provider === 'lmstudio' ? JSON.stringify(part.input) : part.input
           }
         }))
       });
@@ -666,7 +686,7 @@ function convertMessages(
     for (const part of toolResults) {
       converted.push({
         role: 'tool',
-        tool_name: toolNames.get(part.callId) || 'tool',
+        ...(provider === 'lmstudio' ? { tool_call_id: part.callId } : { tool_name: toolNames.get(part.callId) || 'tool' }),
         content: part.content
           .map((entry) => {
             if (entry instanceof vscode.LanguageModelTextPart) {
@@ -847,25 +867,30 @@ function flushOpenAiToolCalls(
 }
 
 function parseOpenAiArguments(value: string | undefined): object {
-  if (!value) {
-    return {};
-  }
-
-  try {
-    return JSON.parse(value) as object;
-  } catch {
-    return { raw: value };
-  }
+  return normalizeToolArguments(value);
 }
 
 function normalizeToolArguments(value: object | string | undefined): object {
-  if (!value) {
-    return {};
-  }
+  let parsed: unknown = value;
   if (typeof value === 'string') {
-    return parseOpenAiArguments(value);
+    try { parsed = JSON.parse(value); }
+    catch { throw new Error('Invalid tool-call arguments: expected a JSON object.'); }
   }
-  return value;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Invalid tool-call arguments: expected a JSON object.');
+  }
+  return parsed;
+}
+
+function validateToolCall(name: string, input: object, tools: readonly vscode.LanguageModelChatTool[]): void {
+  const tool = tools.find((entry) => entry.name === name);
+  if (!tool) { throw new Error(`Model returned an unrequested tool: ${name}`); }
+  if (tool.inputSchema) {
+    const validate = new Ajv({ allErrors: true, strict: false, coerceTypes: false, useDefaults: false, removeAdditional: false }).compile(tool.inputSchema);
+    if (!validate(input)) {
+      throw new Error(`Invalid arguments for ${name}: ${JSON.stringify(validate.errors)}. The bridge will not invent tool arguments.`);
+    }
+  }
 }
 
 function evaluateToolCalling(options: {
@@ -875,43 +900,14 @@ function evaluateToolCalling(options: {
   metadataCapabilities?: string[];
   visibilityMode: ChatModelVisibilityMode;
 }): { supported: boolean; reason: string } {
-  const configured = normalizeAllowlist(options.allowlist);
-  if (configured.size) {
-    return configured.has(options.modelId)
-      ? { supported: true, reason: 'Configured in tool-calling allowlist.' }
-      : { supported: false, reason: 'Allowlist is configured and this model is not in it.' };
-  }
-
   const metadata = (options.metadataCapabilities || []).map((entry) => entry.toLowerCase());
-  if (metadata.includes('tool_use')) {
-    return { supported: true, reason: 'Provider metadata reports tool_use capability.' };
-  }
-
   if (isEmbeddingLikeModel(options.modelId)) {
-    return {
-      supported: false,
-      reason: 'This looks like an embedding or non-chat model, so it is intentionally hidden from chat-focused tool advertising.'
-    };
+    return { supported: false, reason: 'Embedding model; tool calling is not advertised.' };
   }
-
-  if (options.visibilityMode === 'all-chat-models') {
-    return {
-      supported: true,
-      reason: 'Chat visibility mode is set to all-chat-models, so this non-embedding model is advertised in Chat.'
-    };
+  if (metadata.includes('tools') || metadata.includes('tool_use')) {
+    return { supported: true, reason: 'Provider reports tool capability; live execution remains unverified.' };
   }
-
-  if (options.visibilityMode === 'balanced') {
-    return {
-      supported: true,
-      reason: 'Chat visibility mode is balanced, so this likely chat-capable model is advertised in Chat and normal chat requests will retry without tools if needed.'
-    };
-  }
-
-  return {
-    supported: false,
-    reason: 'Tool calling is off by default unless provider metadata reports support or the model is explicitly allowlisted.'
-  };
+  return { supported: false, reason: 'Tool capability unknown. Visibility and allowlists are not evidence of tool support.' };
 }
 
 async function inspectToolSupport(provider: LocalLlmChatProvider): Promise<void> {
@@ -928,7 +924,7 @@ async function inspectToolSupport(provider: LocalLlmChatProvider): Promise<void>
   const picked = await vscode.window.showQuickPick(
     diagnostics.map((item) => ({
       label: `${item.provider === 'ollama' ? 'Ollama' : 'LM Studio'}: ${item.name}`,
-      description: item.toolCalling ? 'Tool calling: supported' : 'Tool calling: not advertised',
+      description: item.toolCalling ? 'Tool calling: provider-reported (unverified)' : 'Tool calling: unknown / not advertised',
       detail: item.reason,
       item
     })),
@@ -942,7 +938,7 @@ async function inspectToolSupport(provider: LocalLlmChatProvider): Promise<void>
   }
 
   await vscode.window.showInformationMessage(
-    `${picked.item.name} (${picked.item.provider}) ${picked.item.toolCalling ? 'supports' : 'does not advertise'} tool calling. ${picked.item.reason}`
+    `${picked.item.name} (${picked.item.provider}) ${picked.item.toolCalling ? 'reports' : 'does not advertise'} tool calling. ${picked.item.reason}`
   );
 }
 
@@ -977,6 +973,16 @@ async function discoverOllamaSupportDiagnostics(
     token
   });
 
+  const capabilities = new Map<string, string[]>();
+  await Promise.all((response.models || []).map(async (entry) => {
+    try {
+      const shown = await fetchJson<{ capabilities?: string[] }>(`${trimTrailingSlash(config.ollama.baseUrl)}/api/show`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: entry.name }), timeoutMs: config.requestTimeoutMs, token
+      });
+      capabilities.set(entry.name, shown.capabilities || []);
+    } catch { /* Failed metadata lookup leaves Ask available, tools unknown. */ }
+  }));
   const configured = normalizeAllowlist(config.ollama.models);
   const models = Array.isArray(response.models) ? response.models : [];
 
@@ -987,7 +993,7 @@ async function discoverOllamaSupportDiagnostics(
         provider: 'ollama',
         modelId: entry.name,
         allowlist: config.ollama.toolCallingModels,
-        metadataCapabilities: entry.details?.families || (entry.details?.family ? [entry.details.family] : []),
+        metadataCapabilities: capabilities.get(entry.name),
         visibilityMode: config.chatModelVisibility
       });
 
@@ -1053,6 +1059,9 @@ async function fetchWithTimeout(url: string, options: FetchOptions): Promise<Res
   const abortHandler = () => controller.abort(new Error('Request cancelled by VS Code'));
   const cancellationSubscription = options.token.onCancellationRequested(abortHandler);
 
+  let handedOff = false;
+  const cleanup = () => { clearTimeout(timeout); cancellationSubscription.dispose(); };
+  if (options.token.isCancellationRequested) { abortHandler(); }
   try {
     const response = await fetch(url, {
       method: options.method,
@@ -1066,10 +1075,22 @@ async function fetchWithTimeout(url: string, options: FetchOptions): Promise<Res
       throw new HttpError(url, response.status, response.statusText, responseText);
     }
 
-    return response;
+    if (!response.body) { return response; }
+    const reader = response.body.getReader();
+    const body = new ReadableStream<Uint8Array>({
+      async pull(stream) {
+        try {
+          const result = await reader.read();
+          if (result.done) { cleanup(); reader.releaseLock(); stream.close(); }
+          else { stream.enqueue(result.value); }
+        } catch (error) { cleanup(); stream.error(error); }
+      },
+      async cancel(reason) { cleanup(); await reader.cancel(reason); }
+    });
+    handedOff = true;
+    return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   } finally {
-    clearTimeout(timeout);
-    cancellationSubscription.dispose();
+    if (!handedOff) { cleanup(); }
   }
 }
 
@@ -1165,7 +1186,7 @@ function shouldRetryWithoutTools(error: unknown, requestUsesTools: boolean): boo
     return false;
   }
 
-  return error instanceof HttpError && error.status === 400;
+  return error instanceof HttpError && error.status === 400 && /(?:does not support tools|tools? (?:is|are) not supported|unsupported tools?)/i.test(error.responseText);
 }
 
 async function configureChatVisibility(provider: LocalLlmChatProvider): Promise<void> {
@@ -1175,17 +1196,17 @@ async function configureChatVisibility(provider: LocalLlmChatProvider): Promise<
       {
         label: 'Balanced (Recommended)',
         value: 'balanced',
-        detail: 'Show likely chat models in Chat. If a model rejects tool payloads, normal chat retries without tools.'
+        detail: 'Keep chat discovery available; visibility does not enable tool calling.'
       },
       {
         label: 'Strict',
         value: 'strict',
-        detail: 'Only show models as tool-capable when metadata or explicit allowlists say they support it.'
+        detail: 'Legacy preference; tool capability comes from provider metadata, independently of visibility.'
       },
       {
         label: 'All Chat Models',
         value: 'all-chat-models',
-        detail: 'Advertise every non-embedding model in Chat. Most permissive, but some models may be flaky in tool-heavy flows.'
+        detail: 'Legacy visibility preference; does not prove tool capability.'
       }
     ],
     {
@@ -1243,3 +1264,5 @@ function findEventBoundary(buffer: string): number {
   }
   return Math.min(unixBoundary, windowsBoundary);
 }
+
+export const testing = { convertMessages, convertTools, normalizeToolArguments, validateToolCall, evaluateToolCalling, shouldRetryWithoutTools, readNdjsonStream, readSseStream, LocalLlmChatProvider };
